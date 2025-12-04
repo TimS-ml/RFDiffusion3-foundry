@@ -69,18 +69,18 @@ class SubsampleToTypes(Transform):
 
     def __init__(
         self,
-        allowed_types: list | str = ["is_protein"],
-    ):
+        allowed_types: list[str] | str = ["is_protein"],
+    ) -> None:
         self.allowed_types = allowed_types
         if not self.allowed_types == "ALL":
             for k in allowed_types:
                 if not k.startswith("is_"):
                     raise ValueError(f"Allowed types must start with 'is_', got {k}")
 
-    def check_input(self, data: dict):
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["atom_array"])
 
-    def forward(self, data):
+    def forward(self, data: dict) -> dict:
         atom_array = data["atom_array"]
 
         # ... Subsampling
@@ -129,14 +129,14 @@ class CreateDesignReferenceFeatures(Transform):
 
     def __init__(
         self,
-        generate_conformers,
-        generate_conformers_for_non_protein_only,
-        provide_reference_conformer_when_unmasked,
-        ground_truth_conformer_policy,
-        provide_elements_for_unindexed_components,
-        use_element_for_atom_names_of_atomized_tokens,
-        **kwargs,
-    ):
+        generate_conformers: bool,
+        generate_conformers_for_non_protein_only: bool,
+        provide_reference_conformer_when_unmasked: bool,
+        ground_truth_conformer_policy: str,
+        provide_elements_for_unindexed_components: bool,
+        use_element_for_atom_names_of_atomized_tokens: bool,
+        **kwargs: Any,
+    ) -> None:
         self.generate_conformers = generate_conformers
         self.generate_conformers_for_non_protein_only = (
             generate_conformers_for_non_protein_only
@@ -160,10 +160,10 @@ class CreateDesignReferenceFeatures(Transform):
             "use_element_for_atom_names_of_atomized_tokens": use_element_for_atom_names_of_atomized_tokens,
         } | kwargs
 
-    def check_input(self, data: dict):
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["atom_array"])
 
-    def forward(self, data: dict) -> dict:
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         atom_array = data["atom_array"]
         I = atom_array.array_length()
         token_starts = get_token_starts(atom_array)
@@ -344,10 +344,10 @@ class CreateDesignReferenceFeatures(Transform):
 
 
 class FeaturizeAtoms(Transform):
-    def __init__(self, n_bins=4):
+    def __init__(self, n_bins: int = 4) -> None:
         self.n_bins = n_bins
 
-    def forward(self, data):
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         atom_array = data["atom_array"]
 
         if "feats" not in data:
@@ -420,21 +420,21 @@ class AddIsXFeats(Transform):
 
     def __init__(
         self,
-        X,
-        central_atom,
+        X: list[str],
+        central_atom: str,
         extra_atom_level_feats: list[str] = [],
         extra_token_level_feats: list[str] = [],
-    ):
+    ) -> None:
         self.X = X
         self.central_atom = central_atom
         self.update_atom_array = False
         self.extra_atom_level_feats = extra_atom_level_feats
         self.extra_token_level_feats = extra_token_level_feats
 
-    def check_input(self, data):
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["atom_array", "feats"])
 
-    def forward(self, data: dict) -> dict:
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         atom_array = data["atom_array"]
         atom_array = add_backbone_and_sidechain_annotations(atom_array)
         token_level_array = atom_array[get_token_starts(atom_array)]
@@ -533,10 +533,10 @@ class MotifCenterRandomAugmentation(Transform):
 
     def __init__(
         self,
-        batch_size,
-        sigma_perturb,
-        center_option,
-    ):
+        batch_size: int,
+        sigma_perturb: float,
+        center_option: str,
+    ) -> None:
         """
         Randomly augments the coordinates of the motif center for diffusion training.
         During inference, this behaviour is handled by the sampler at every step
@@ -546,10 +546,10 @@ class MotifCenterRandomAugmentation(Transform):
         self.sigma_perturb = sigma_perturb
         self.center_option = center_option
 
-    def check_input(self, data: dict):
+    def check_input(self, data: dict) -> None:
         pass
 
-    def forward(self, data):
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Applies CenterRandomAugmentation
 
@@ -613,20 +613,20 @@ class AugmentNoise(Transform):
 
     def __init__(
         self,
-        sigma_perturb_com,
-        batch_size,
-    ):
+        sigma_perturb_com: float,
+        batch_size: int,
+    ) -> None:
         """
         Scaled perturbation to the offset between motif and diffused region based on time
         """
         self.sigma_perturb_com = sigma_perturb_com
         self.batch_size = batch_size
 
-    def check_input(self, data: dict):
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["noise", "coord_atom_lvl_to_be_noised"])
         check_contains_keys(data, ["feats"])
 
-    def forward(self, data: dict) -> dict:
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         is_motif_atom_with_fixed_coord = data["feats"]["is_motif_atom_with_fixed_coord"]
         device = data["coord_atom_lvl_to_be_noised"].device
         data["noise"][..., is_motif_atom_with_fixed_coord, :] = 0.0
@@ -656,13 +656,13 @@ class AddGroundTruthSequence(Transform):
         ['ground_truth']['seq_token_lvl'] (torch.Tensor): The ground truth token level sequence [L,]
     """
 
-    def __init__(self, sequence_encoding):
+    def __init__(self, sequence_encoding: Any) -> None:
         self.sequence_encoding = sequence_encoding
 
-    def check_input(self, data):
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["atom_array"])
 
-    def forward(self, data: dict) -> dict:
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         atom_array = data["atom_array"]
         token_starts = get_token_starts(atom_array)
         res_names = atom_array.res_name[token_starts]
@@ -694,19 +694,21 @@ class AddAdditional1dFeaturesToFeats(Transform):
 
     def __init__(
         self,
-        token_1d_features,
-        atom_1d_features,
-        autofill_zeros_if_not_present_in_atomarray=False,
-    ):
+        token_1d_features: Dict[str, int],
+        atom_1d_features: Dict[str, int],
+        autofill_zeros_if_not_present_in_atomarray: bool = False,
+    ) -> None:
         self.autofill = autofill_zeros_if_not_present_in_atomarray
         self.token_1d_features = token_1d_features
         self.atom_1d_features = atom_1d_features
 
-    def check_input(self, data) -> None:
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["atom_array"])
         check_is_instance(data, "atom_array", AtomArray)
 
-    def generate_feature(self, feature_name, n_dims, data, feature_type):
+    def generate_feature(
+        self, feature_name: str, n_dims: int, data: Dict[str, Any], feature_type: str
+    ) -> Dict[str, Any]:
         if feature_name in data["feats"].keys():
             return data
         elif feature_name in data["atom_array"].get_annotation_categories():
@@ -772,12 +774,12 @@ class FeaturizepLDDT(Transform):
 
     def __init__(
         self,
-        skip,
-    ):
+        skip: bool,
+    ) -> None:
         self.skip = skip
         self.bsplit = 80  # Threshold for splitting pLDDT into high and low
 
-    def forward(self, data: dict) -> dict:
+    def forward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         atom_array = data["atom_array"]
         token_starts = get_token_starts(atom_array)
         I = len(token_starts)

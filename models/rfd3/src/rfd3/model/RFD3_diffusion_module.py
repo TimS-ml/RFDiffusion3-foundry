@@ -2,6 +2,7 @@ import functools
 import logging
 import os
 from contextlib import ExitStack
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -33,26 +34,26 @@ class RFD3DiffusionModule(nn.Module):
     def __init__(
         self,
         *,
-        c_atom,
-        c_atompair,
-        c_token,
-        c_s,
-        c_z,
-        c_t_embed,
-        sigma_data,
-        f_pred,
-        n_attn_seq_neighbours,
-        n_attn_keys,
-        n_recycle,
-        atom_attention_encoder,
-        diffusion_token_encoder,
-        diffusion_transformer,
-        atom_attention_decoder,
+        c_atom: int,
+        c_atompair: int,
+        c_token: int,
+        c_s: int,
+        c_z: int,
+        c_t_embed: int,
+        sigma_data: float,
+        f_pred: str,
+        n_attn_seq_neighbours: int,
+        n_attn_keys: int,
+        n_recycle: int,
+        atom_attention_encoder: Dict[str, Any],
+        diffusion_token_encoder: Dict[str, Any],
+        diffusion_transformer: Dict[str, Any],
+        atom_attention_decoder: Dict[str, Any],
         # upcast,
-        downcast,
-        use_local_token_attention=True,
-        **_,
-    ):
+        downcast: Dict[str, Any],
+        use_local_token_attention: bool = True,
+        **_: Any,
+    ) -> None:
         super().__init__()
         self.sigma_data = sigma_data
         self.c_atom = c_atom
@@ -124,7 +125,7 @@ class RFD3DiffusionModule(nn.Module):
             **atom_attention_decoder,
         )
 
-    def scale_positions_in(self, X_noisy_L, t):
+    def scale_positions_in(self, X_noisy_L: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         if t.ndim == 1:
             t = t[..., None, None]  # [B, (n_atoms), (3)]
         elif t.ndim == 2:
@@ -140,7 +141,9 @@ class RFD3DiffusionModule(nn.Module):
             raise Exception(f"{self.f_pred=} unrecognized")
         return R_noisy_L
 
-    def scale_positions_out(self, R_update_L, X_noisy_L, t):
+    def scale_positions_out(
+        self, R_update_L: torch.Tensor, X_noisy_L: torch.Tensor, t: torch.Tensor
+    ) -> torch.Tensor:
         if t.ndim == 1:
             t = t[..., None, None]
         elif t.ndim == 2:
@@ -158,7 +161,7 @@ class RFD3DiffusionModule(nn.Module):
             raise Exception(f"{self.f_pred=} unrecognized")
         return X_out_L
 
-    def process_time_(self, t_L, i):
+    def process_time_(self, t_L: torch.Tensor, i: int) -> torch.Tensor:
         C_L = self.process_n[i](
             self.fourier_embedding[i](
                 1 / 4 * torch.log(torch.clamp(t_L, min=1e-20) / self.sigma_data)
@@ -170,21 +173,21 @@ class RFD3DiffusionModule(nn.Module):
 
     def forward(
         self,
-        X_noisy_L,
-        t,
-        f,
+        X_noisy_L: torch.Tensor,
+        t: torch.Tensor,
+        f: Dict[str, Any],
         # Features from initialization
-        Q_L_init,
-        C_L,
-        P_LL,
-        S_I,
-        Z_II,
-        n_recycle=None,
+        Q_L_init: torch.Tensor,
+        C_L: torch.Tensor,
+        P_LL: torch.Tensor,
+        S_I: torch.Tensor,
+        Z_II: torch.Tensor,
+        n_recycle: Optional[int] = None,
         # Chunked memory optimization parameters
-        chunked_pairwise_embedder=None,
-        initializer_outputs=None,
-        **kwargs,
-    ):
+        chunked_pairwise_embedder: Optional[Any] = None,
+        initializer_outputs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, torch.Tensor]:
         """
         Diffusion forward pass with recycling.
         Computes denoised positions given encoded features and noisy coordinates.
@@ -268,9 +271,9 @@ class RFD3DiffusionModule(nn.Module):
 
     def forward_with_recycle(
         self,
-        n_recycle,
-        **kwargs,
-    ):
+        n_recycle: Optional[int],
+        **kwargs: Any,
+    ) -> Dict[str, torch.Tensor]:
         if not self.training:
             n_recycle = self.n_recycle
         else:
@@ -299,23 +302,23 @@ class RFD3DiffusionModule(nn.Module):
 
     def process_(
         self,
-        D_II_self,
-        X_L_self,
+        D_II_self: Optional[torch.Tensor],
+        X_L_self: Optional[torch.Tensor],
         *,
-        R_L_uniform,
-        X_noisy_L,
-        t_L,
-        f,
-        Q_L,
-        C_L,
-        P_LL,
-        A_I,
-        S_I,
-        Z_II,
-        chunked_pairwise_embedder=None,
-        initializer_outputs=None,
-        **_,
-    ):
+        R_L_uniform: torch.Tensor,
+        X_noisy_L: torch.Tensor,
+        t_L: torch.Tensor,
+        f: Dict[str, Any],
+        Q_L: torch.Tensor,
+        C_L: torch.Tensor,
+        P_LL: torch.Tensor,
+        A_I: torch.Tensor,
+        S_I: torch.Tensor,
+        Z_II: torch.Tensor,
+        chunked_pairwise_embedder: Optional[Any] = None,
+        initializer_outputs: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> Dict[str, torch.Tensor]:
         # ... Embed token level features with atom level encodings
         S_I, Z_II = self.diffusion_token_encoder(
             f=f,
