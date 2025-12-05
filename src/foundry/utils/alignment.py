@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import torch
 
@@ -6,11 +7,11 @@ logger = logging.getLogger(__name__)
 
 
 def weighted_rigid_align(
-    X_L,  # [B, L, 3]
-    X_gt_L,  # [B, L, 3]
-    X_exists_L=None,  # [L]
-    w_L=None,  # [B, L]
-):
+    X_L: torch.Tensor,  # [B, L, 3]
+    X_gt_L: torch.Tensor,  # [B, L, 3]
+    X_exists_L: Optional[torch.Tensor] = None,  # [L]
+    w_L: Optional[torch.Tensor] = None,  # [B, L]
+) -> torch.Tensor:
     """
     Weighted rigid body alignment of X_gt_L onto X_L with weights w_L
     Allows for "moving target" ground truth that is se3 invariant
@@ -78,13 +79,15 @@ def weighted_rigid_align(
     return X_align_L.detach()
 
 
-def get_rmsd(xyz1, xyz2, eps=1e-4):
+def get_rmsd(xyz1: torch.Tensor, xyz2: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     L = xyz1.shape[-2]
     rmsd = torch.sqrt(torch.sum((xyz2 - xyz1) * (xyz2 - xyz1), axis=(-1, -2)) / L + eps)
     return rmsd
 
 
-def superimpose(xyz1, xyz2, mask, eps=1e-4):
+def superimpose(
+    xyz1: torch.Tensor, xyz2: torch.Tensor, mask: torch.Tensor, eps: float = 1e-4
+) -> torch.Tensor:
     """
     Superimpose xyz1 onto xyz2 using mask
     """
