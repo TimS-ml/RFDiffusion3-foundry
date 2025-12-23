@@ -63,13 +63,33 @@ class ConditionedTransitionBlock(nn.Module):
 
 
 class PositionPairDistEmbedder(nn.Module):
+    """
+    位置配对距离嵌入器 (Algorithm 14: Position Pair Distance Embedding)
+    Position Pair Distance Embedder
+
+    将原子对的参考位置编码为配对特征。使用逆配对距离编码空间关系。
+    Encodes reference positions of atom pairs into pairwise features.
+    Uses inverse pairwise distance to encode spatial relationships.
+
+    算法步骤 / Algorithm Steps:
+    1. 计算配对距离向量 d_lm = ref_pos_l - ref_pos_m
+    2. 编码逆配对距离: 1/(1 + ||d_lm||^2)
+    3-4. 嵌入mask信息并应用到特征上
+
+    参数 / Parameters:
+        c_atompair: 配对特征维度 / Pairwise feature dimension
+        embed_frame: 是否嵌入完整的距离向量(3D) / Whether to embed full distance vector (3D)
+    """
     def __init__(self, c_atompair, embed_frame=True):
         super().__init__()
         self.embed_frame = embed_frame
         if embed_frame:
+            # 嵌入完整的3D距离向量 / Embed full 3D distance vector
             self.process_d = linearNoBias(3, c_atompair)
 
+        # Algorithm 14 步骤2: 编码逆配对距离 / Step 2: Encode inverse pairwise distance
         self.process_inverse_dist = linearNoBias(1, c_atompair)
+        # Algorithm 14 步骤3-4: 嵌入mask / Step 3-4: Embed mask
         self.process_valid_mask = linearNoBias(1, c_atompair)
 
     def forward_af3(self, D_LL, V_LL):
@@ -98,33 +118,60 @@ class PositionPairDistEmbedder(nn.Module):
         return P_LL
 
     def forward(self, ref_pos, valid_mask):
-        D_LL = ref_pos.unsqueeze(-2) - ref_pos.unsqueeze(-3)
-        V_LL = valid_mask
+        """
+        算法步骤 / Algorithm steps (Algorithm 14):
+        1. 计算配对距离 / Compute pairwise distances
+        2. 编码逆配对距离 / Encode inverse pairwise distance
+        3-4. 嵌入mask / Embed mask
+        """
+        # 步骤1: 计算配对距离向量 / Step 1: Compute pairwise distance vectors
+        D_LL = ref_pos.unsqueeze(-2) - ref_pos.unsqueeze(-3)  # [L, L, 3] or [B, L, L, 3]
+        V_LL = valid_mask  # [L, L, 1] or [B, L, L, 1]
 
         if self.embed_frame:
-            # Embed pairwise distances
+            # 嵌入完整的3D距离框架 / Embed full 3D distance frame
             return self.forward_af3(D_LL, V_LL)
+
+        # 步骤2: 编码逆配对距离 / Step 2: Encode inverse pairwise distance
+        # 计算距离的平方: ||d_lm||^2
         norm = torch.linalg.norm(D_LL, dim=-1, keepdim=True) ** 2
-        norm = torch.clamp(norm, min=1e-6)
+        norm = torch.clamp(norm, min=1e-6)  # 避免除以零 / Avoid division by zero
+        # 逆距离编码: 1/(1 + ||d_lm||^2)
         inv_dist = 1 / (1 + norm)
         P_LL = self.process_inverse_dist(inv_dist) * V_LL
+
+        # 步骤3-4: 添加mask嵌入 / Step 3-4: Add mask embedding
         P_LL = P_LL + self.process_valid_mask(V_LL.to(P_LL.dtype)) * V_LL
         return P_LL
 
 
 class OneDFeatureEmbedder(nn.Module):
     """
-    Embeds 1D features into a single vector.
+    一维特征嵌入器 (Algorithm 15: One-dimension Feature Embedder)
+    One-dimension Feature Embedder
 
-    Args:
-        features (dict): Dictionary of feature names and their number of channels.
-        output_channels (int): Output dimension of the projected embedding.
+    将多个1D特征(残基类型、原子类型等)嵌入并求和为单个向量。
+    Embeds and sums multiple 1D features (residue type, atom type, etc.) into a single vector.
+
+    算法步骤 / Algorithm Steps:
+    1. 对每个1D特征f_i进行独立嵌入: e_i = Embed(f_i)
+    2. 求和所有嵌入: e = Σ e_i
+
+    这种加法聚合允许模型组合多个特征源。
+    This additive aggregation allows the model to compose multiple feature sources.
+
+    参数 / Args:
+        features (dict): 特征名称及其通道数的字典 / Dictionary of feature names and their number of channels
+        output_channels (int): 输出嵌入维度 / Output dimension of the projected embedding
     """
 
     def __init__(self, features, output_channels):
         super().__init__()
+        # 过滤存在的特征 / Filter existing features
         self.features = {k: v for k, v in features.items() if exists(v)}
         total_embedding_input_features = sum(self.features.values())
+
+        # 为每个特征创建独立的嵌入层 / Create independent embedding layer for each feature
         self.embedders = nn.ModuleDict(
             {
                 feature: EmbeddingLayer(
@@ -135,6 +182,17 @@ class OneDFeatureEmbedder(nn.Module):
         )
 
     def forward(self, f, collapse_length):
+        """
+        前向传播 / Forward pass
+
+        参数 / Args:
+            f: 特征字典 / Feature dictionary
+            collapse_length: 折叠长度(I或L) / Collapse length (I or L)
+
+        返回 / Returns:
+            嵌入特征的总和 / Sum of embedded features: [collapse_length, output_channels]
+        """
+        # Algorithm 15: 对每个1D特征嵌入并求和 / Embed each 1D feature and sum
         return sum(
             tuple(
                 self.embedders[feature](collapse(f[feature].float(), collapse_length))
@@ -146,37 +204,54 @@ class OneDFeatureEmbedder(nn.Module):
 
 class SinusoidalDistEmbed(nn.Module):
     """
-    Applies sinusoidal embedding to pairwise distances and projects to c_atompair.
+    正弦距离嵌入 (Algorithm 13: Sinusoidal Distance Embedding)
+    Sinusoidal Distance Embedding
 
-    Args:
-        c_atompair (int): Output dimension of the projected embedding (must be even).
+    对配对距离应用正弦嵌入,类似于Transformer中的位置编码。
+    Applies sinusoidal embedding to pairwise distances, similar to positional encoding in Transformers.
+
+    算法步骤 / Algorithm Steps:
+    1. 计算配对距离 ||p_l - p_m||
+    2-4. 正弦嵌入:
+         - 频率: ω_k = 1 / (10000^(2k/D))
+         - 角度: θ_lmk = d_lm * ω_k
+         - 嵌入: e_lm = [sin(θ) || cos(θ)]
+    5-7. 应用并嵌入mask
+
+    参数 / Args:
+        c_atompair (int): 输出投影嵌入维度(必须为偶数) / Output dimension (must be even)
+        n_freqs (int): sin/cos对数,总正弦维度 = 2 * n_freqs / Number of sin/cos pairs
     """
 
     def __init__(self, c_atompair, n_freqs=32):
         super().__init__()
         assert c_atompair % 2 == 0, "Output embedding dim must be even"
 
-        self.n_freqs = (
-            n_freqs  # Number of sin/cos pairs → total sinusoidal dim = 2 * n_freqs
-        )
+        self.n_freqs = n_freqs  # Number of sin/cos pairs → total sinusoidal dim = 2 * n_freqs
         self.c_atompair = c_atompair
 
+        # 投影正弦嵌入到输出维度 / Project sinusoidal embedding to output dimension
         self.output_proj = linearNoBias(2 * n_freqs, c_atompair)
+        # Algorithm 13 步骤5-7: 嵌入mask / Step 5-7: Embed mask
         self.process_valid_mask = linearNoBias(1, c_atompair)
 
     def forward(self, pos, valid_mask):
         """
-        Args:
-            pos: [L, 3] or [B, L, 3] ground truth atom positions
-            valid_mask: [L, L, 1] or [B, L, L, 1] boolean mask
-        Returns:
-            P_LL: [L, L, c_atompair] or [B, L, L, c_atompair]
+        前向传播 / Forward pass
+
+        参数 / Args:
+            pos: [L, 3] 或 [B, L, 3] 原子位置 / Atom positions
+            valid_mask: [L, L, 1] 或 [B, L, L, 1] 有效性mask / Validity mask
+
+        返回 / Returns:
+            P_LL: [L, L, c_atompair] 或 [B, L, L, c_atompair] 嵌入的配对特征
         """
-        # Compute pairwise distances
+        # ===== 步骤1: 计算配对距离 / Step 1: Compute pairwise distances =====
         D_LL = pos.unsqueeze(-2) - pos.unsqueeze(-3)  # [L, L, 3] or [B, L, L, 3]
         dist_matrix = torch.linalg.norm(D_LL, dim=-1)  # [L, L] or [B, L, L]
 
-        # Sinusoidal embedding
+        # ===== 步骤2-4: 正弦嵌入 / Step 2-4: Sinusoidal embedding =====
+        # 步骤2: 计算频率 ω_k = 1 / (10000^(2k/D))
         half_dim = self.n_freqs
         freq = torch.exp(
             -math.log(10000.0)
@@ -184,16 +259,19 @@ class SinusoidalDistEmbed(nn.Module):
             / half_dim
         ).to(dist_matrix.device)  # [n_freqs]
 
-        angles = dist_matrix.unsqueeze(-1) * freq  # [..., D/2]
-        sin_embed = torch.sin(angles)
-        cos_embed = torch.cos(angles)
-        sincos_embed = torch.cat([sin_embed, cos_embed], dim=-1)  # [..., D]
+        # 步骤3: 计算角度 θ_lmk = d_lm * ω_k
+        angles = dist_matrix.unsqueeze(-1) * freq  # [..., n_freqs]
 
-        # Linear projection
+        # 步骤4: 应用sin和cos生成嵌入 / Apply sin and cos to generate embedding
+        sin_embed = torch.sin(angles)  # [..., n_freqs]
+        cos_embed = torch.cos(angles)  # [..., n_freqs]
+        sincos_embed = torch.cat([sin_embed, cos_embed], dim=-1)  # [..., 2*n_freqs]
+
+        # 线性投影到输出维度 / Linear projection to output dimension
         P_LL = self.output_proj(sincos_embed)  # [..., c_atompair]
         P_LL = P_LL * valid_mask
 
-        # Add linear embedding of valid mask
+        # ===== 步骤5-7: 添加mask嵌入 / Step 5-7: Add mask embedding =====
         P_LL = P_LL + self.process_valid_mask(valid_mask.to(P_LL.dtype)) * valid_mask
         return P_LL
 
@@ -516,7 +594,26 @@ class Upcast(nn.Module):
 
 
 class Downcast(nn.Module):
-    """Downcast modules for when atoms are already reshaped from N_atoms -> (N_tokens, 14)"""
+    """
+    下投影 (Algorithm 9: Downcast)
+    Downcast
+
+    将atom级特征池化到token级特征。使用交叉注意力或平均池化。
+    Pools atom-level features to token-level features using cross-attention or mean pooling.
+
+    算法步骤 / Algorithm Steps (Algorithm 9):
+    1. 按token ID分组原子: group_atoms(q_ia)
+    2. 交叉注意力池化: GatedCrossAttention (Q=a_i, KV=q_ia)
+       或平均池化: mean(q_ia) per token
+    3. (可选) 添加单轨迹特征 s_i
+    4. 返回更新的token特征 a_i
+
+    参数 / Parameters:
+        c_atom: Atom特征维度 / Atom feature dimension
+        c_token: Token特征维度 / Token feature dimension
+        c_s: (可选) 单轨迹特征维度 / Optional single track feature dimension
+        method: "mean" (平均池化) 或 "cross_attention" / Pooling method
+    """
 
     def __init__(
         self, c_atom, c_token, c_s=None, method="mean", cross_attention_block=None
@@ -525,6 +622,8 @@ class Downcast(nn.Module):
         self.method = method
         self.c_token = c_token
         self.c_atom = c_atom
+
+        # 可选: 处理单轨迹特征 / Optional: process single track features
         if c_s is not None:
             self.process_s = nn.Sequential(
                 RMSNorm((c_s,)),
@@ -533,9 +632,12 @@ class Downcast(nn.Module):
         else:
             self.process_s = None
 
+        # 池化方法 / Pooling method
         if self.method == "mean":
+            # 平均池化: 投影并求平均 / Mean pooling: project and average
             self.project = linearNoBias(c_atom, c_token)
         elif self.method == "cross_attention":
+            # Algorithm 11: GatedCrossAttention - Q=token, KV=atoms
             self.gca = GatedCrossAttention(
                 c_query=c_token,
                 c_kv=c_atom,
@@ -545,24 +647,58 @@ class Downcast(nn.Module):
             raise ValueError(f"Unknown downcast method: {self.method}")
 
     def forward_(self, Q_IA, A_I, S_I=None, valid_mask=None):
+        """
+        核心Downcast操作 / Core downcast operation
+
+        参数 / Args:
+            Q_IA: [B, I, max_atoms, c_atom] 分组的atom特征 / Grouped atom features
+            A_I: [B, I, c_token] 当前token特征 / Current token features
+            S_I: [B, I, c_s] (可选) 单轨迹特征 / Optional single track features
+            valid_mask: [I, max_atoms] 有效atom mask / Valid atom mask
+
+        返回 / Returns:
+            A_I: [B, I, c_token] 更新后的token特征 / Updated token features
+        """
+        # ===== Algorithm 9 步骤2: 池化操作 / Step 2: Pooling operation =====
         if self.method == "mean":
+            # 平均池化: project并除以有效atom数 / Mean pooling: project and divide by valid atom count
             A_I_update = self.project(Q_IA).sum(-2) / valid_mask.sum(-1, keepdim=True)
         elif self.method == "cross_attention":
+            # Algorithm 11: GatedCrossAttention
             assert exists(A_I) and exists(valid_mask)
-            # Attention mask: ..., 1, n_atom_per_tok (1 querying token to atoms in token)
+            # Attention mask: ..., 1, n_atom_per_tok (1个查询token对应token内的atoms)
             attn_mask = valid_mask[..., None, :]
             A_I_update = self.gca(
-                q=A_I[..., None, :], kv=Q_IA, attn_mask=attn_mask
+                q=A_I[..., None, :],  # Q: 单个token特征
+                kv=Q_IA,  # KV: token内的所有atom特征
+                attn_mask=attn_mask
             ).squeeze(-2)
 
+        # 残差连接 / Residual connection
         A_I = A_I + A_I_update if exists(A_I) else A_I_update
 
+        # ===== Algorithm 9 步骤4: (可选) 添加单轨迹特征 / Step 4: (Optional) Add single track features =====
         if self.process_s is not None:
             A_I = A_I + self.process_s(S_I)
         return A_I
 
     def forward(self, Q_L, A_I, S_I=None, tok_idx=None):
+        """
+        前向传播:将atom特征池化到token特征 / Forward: pool atom features to token features
+
+        参数 / Args:
+            Q_L: [B, L, c_atom] 或 [L, c_atom] Atom特征 / Atom features
+            A_I: [B, I, c_token] 或 [I, c_token] 当前token特征 / Current token features
+            S_I: [B, I, c_s] 或 [I, c_s] (可选) 单轨迹特征 / Optional single track features
+            tok_idx: [L] atom到token的映射 / Atom to token mapping
+
+        返回 / Returns:
+            A_I: 更新后的token特征 / Updated token features
+        """
+        # ===== Algorithm 9 步骤1: 按token ID分组原子 / Step 1: Group atoms by token ID =====
         valid_mask = build_valid_mask(tok_idx)
+
+        # 处理批次维度 / Handle batch dimension
         if Q_L.ndim == 2:
             squeeze = True
             Q_L = Q_L.unsqueeze(0)
@@ -572,8 +708,10 @@ class Downcast(nn.Module):
         A_I = A_I.unsqueeze(0) if exists(A_I) and A_I.ndim == 2 else A_I
         S_I = S_I.unsqueeze(0) if exists(S_I) and S_I.ndim == 2 else S_I
 
+        # 将atom特征重新组织为 [B, I, max_atoms, c_atom]
         Q_IA = ungroup_atoms(Q_L, valid_mask)
 
+        # 执行池化操作 / Perform pooling operation
         A_I = self.forward_(Q_IA, A_I, S_I, valid_mask=valid_mask)
 
         if squeeze:
@@ -587,6 +725,33 @@ class Downcast(nn.Module):
 
 
 class LocalTokenTransformer(nn.Module):
+    """
+    局部Token Transformer (Algorithm 6: Local token transformer)
+    Local Token Transformer
+
+    在token级别应用SL2稀疏注意力(序列局部 + 结构局部)。
+    Applies SL2 sparse attention (sequence-local + structure-local) at token level.
+
+    算法步骤 / Algorithm Steps (Algorithm 6):
+    1. 创建SL2稀疏注意力索引 (序列局部 + 结构局部)
+    2-8. 循环通过多个transformer块:
+         4. (可选) Upcast - 如果提供了c_skip
+         6. SparseAttentionPairBias - 带配对偏置的稀疏注意力 (Algorithm 8)
+         7. ConditionedTransitionBlock - 条件化的transition
+
+    关键特性 / Key Features:
+    - SL2稀疏注意力:仅关注序列邻居和结构邻居
+    - 内存高效:避免完整的I×I注意力矩阵
+    - 配对偏置:Z_II作为注意力偏置引导注意力
+
+    参数 / Parameters:
+        c_token: Token特征维度 / Token feature dimension
+        c_tokenpair: Token配对特征维度 / Token pairwise feature dimension
+        c_s: 单轨迹特征维度 / Single track feature dimension
+        n_block: Transformer块数量 / Number of transformer blocks
+        n_local_tokens: 序列局部邻居数 (默认8) / Number of sequence-local neighbors
+        n_keys: 结构局部键数 (默认32) / Number of structure-local keys
+    """
     def __init__(
         self,
         c_token,
@@ -599,8 +764,9 @@ class LocalTokenTransformer(nn.Module):
         n_keys=32,
     ):
         super().__init__()
-        self.n_local_tokens = n_local_tokens
-        self.n_keys = n_keys
+        self.n_local_tokens = n_local_tokens  # 序列局部注意力邻居数
+        self.n_keys = n_keys  # 结构局部注意力键数
+        # 创建transformer块栈 / Create transformer block stack
         self.blocks = nn.ModuleList(
             [
                 StructureLocalAtomTransformerBlock(
@@ -614,26 +780,45 @@ class LocalTokenTransformer(nn.Module):
         )
 
     def forward(self, A_I, S_I, Z_II, f, X_L, full=False):
+        """
+        前向传播 / Forward pass
+
+        参数 / Args:
+            A_I: [B, I, c_token] Token特征 / Token features
+            S_I: [B, I, c_s] 单轨迹特征 / Single track features
+            Z_II: [B, I, I, c_tokenpair] Token配对特征(用作注意力偏置) / Token pair features (as attention bias)
+            f: 特征字典 / Feature dictionary
+            X_L: [B, I, 3] Token坐标(C-alpha位置) / Token coordinates (C-alpha positions)
+            full: 是否使用完整注意力(非稀疏) / Whether to use full attention (non-sparse)
+
+        返回 / Returns:
+            A_I: [B, I, c_token] 更新后的token特征 / Updated token features
+        """
+        # ===== Algorithm 6 步骤1: 创建SL2稀疏注意力索引 / Step 1: Create SL2 sparse attention indices =====
+        # 结合序列局部和结构局部注意力
         indices = create_attention_indices(
-            X_L=X_L,
+            X_L=X_L,  # 用于计算结构局部邻居 / For computing structure-local neighbors
             f=f,
             tok_idx=torch.arange(A_I.shape[1], device=A_I.device),
-            n_attn_keys=self.n_keys,
-            n_attn_seq_neighbours=self.n_local_tokens,
+            n_attn_keys=self.n_keys,  # 结构局部键数 / Structure-local keys
+            n_attn_seq_neighbours=self.n_local_tokens,  # 序列局部邻居数 / Sequence-local neighbors
         )
 
+        # ===== Algorithm 6 步骤2-8: 循环通过transformer块 / Step 2-8: Loop through transformer blocks =====
         for i, block in enumerate(self.blocks):
-            # Set checkpointing
+            # 设置checkpointing以节省内存 / Set checkpointing to save memory
             block.attention_pair_bias.use_checkpointing = not DISABLE_CHECKPOINTING
-            # A_I: [B, L, C_token]
-            # S_I: [B, L, C_s]
-            # Z_II: [B, L, L, C_tokenpair]
+
+            # 步骤6: SparseAttentionPairBias (Algorithm 8) + 步骤7: ConditionedTransitionBlock
+            # A_I: [B, I, c_token] Token特征
+            # S_I: [B, I, c_s] 单轨迹特征(用于条件化)
+            # Z_II: [B, I, I, c_tokenpair] 配对特征(用作注意力偏置)
             A_I = block(
                 A_I,
                 S_I,
                 Z_II,
-                indices=indices,
-                full=full,  # (self.training and torch.is_grad_enabled()),  # Does not accelerate inference, but memory *does* scale better
+                indices=indices,  # SL2稀疏注意力索引
+                full=full,  # 是否使用完整注意力(内存换速度)
             )
 
         return A_I
