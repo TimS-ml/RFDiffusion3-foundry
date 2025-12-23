@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import yaml
@@ -21,11 +21,13 @@ from rfd3.constants import SAVED_CONDITIONING_ANNOTATIONS
 from rfd3.inference.datasets import (
     assemble_distributed_inference_loader_from_json,
 )
-from rfd3.inference.input_parsing import DesignInputSpecification
+from rfd3.inference.input_parsing import (
+    DesignInputSpecification,
+    ensure_input_is_abspath,
+)
 from rfd3.model.inference_sampler import SampleDiffusionConfig
 from rfd3.utils.inference import (
     ensure_inference_sampler_matches_design_spec,
-    ensure_input_is_abspath,
 )
 from rfd3.utils.io import (
     CIF_LIKE_EXTENSIONS,
@@ -376,7 +378,7 @@ class RFD3InferenceEngine(BaseInferenceEngine):
 
     def _multiply_specifications(
         self, inputs: Dict[str, dict | DesignInputSpecification], n_batches=None
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> Dict[str, dict | DesignInputSpecification]:
         # Find existing example IDS in output directory
         if exists(self.out_dir):
             existing_example_ids = set(
@@ -391,9 +393,13 @@ class RFD3InferenceEngine(BaseInferenceEngine):
         design_specifications = {}
         for prefix, example_spec in inputs.items():
             # Record task name in the specification
-            if "extra" not in example_spec:
-                example_spec["extra"] = {}
-            example_spec["extra"]["task_name"] = prefix
+            if isinstance(example_spec, DesignInputSpecification):
+                example_spec.extra = example_spec.extra or {}
+                example_spec.extra["task_name"] = prefix
+            else:
+                if "extra" not in example_spec:
+                    example_spec["extra"] = {}
+                example_spec["extra"]["task_name"] = prefix
 
             # ... Create n_batches for example
             for batch_id in range((n_batches) if exists(n_batches) else 1):
