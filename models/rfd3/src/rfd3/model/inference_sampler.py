@@ -147,10 +147,19 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
         ref_initializer_outputs: dict[str, Any] | None,
         f_ref: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        """
+        Algorithm 1: Inference diffusion loop (./docs/rf3_si.pdf)
+
+        Main inference loop implementing the denoising diffusion process.
+        Corresponds to Algorithm 1 in RFdiffusion3 SI.
+
+        Note: Token and atom embedding (Algorithm 1 - lines 1-2) are performed
+        outside this function and passed via initializer_outputs.
+        """
         # Motif setup to recenter the motif at every step
         is_motif_atom_with_fixed_coord = f["is_motif_atom_with_fixed_coord"]
 
-        # Book-keeping
+        # Book-keeping: Construct noise schedule
         noise_schedule = self._construct_inference_noise_schedule(
             device=coord_atom_lvl_to_be_noised.device,
             partial_t=f.get("partial_t", None),
@@ -159,6 +168,7 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
         L = f["ref_element"].shape[0]
         D = diffusion_batch_size
 
+        # Initialize structure at highest noise level
         X_L = self._get_initial_structure(
             c0=noise_schedule[0],
             D=D,
@@ -182,6 +192,7 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
 
         threshold_step = (len(noise_schedule) - 1) * self.fraction_of_steps_to_fix_motif
 
+        # Algorithm 1 - line 3: for στ ∈ [σ1, ..., σT] do
         for step_num, (c_t_minus_1, c_t) in enumerate(
             zip(noise_schedule, noise_schedule[1:])
         ):
@@ -203,14 +214,16 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
                     s_trans=self.s_trans if step_num >= threshold_step else 0.0,
                 )
 
-            # Update gamma & step scale
+            # Algorithm 1 - line 4: Modulation of ODE/SDE
+            # γ ← γ0 if στ > γmin else 0
             gamma = self.gamma_0 if c_t > self.gamma_min else 0
             step_scale = self.step_scale
 
-            # Compute the value of t_hat
+            # Algorithm 1 - line 5: σ̂ ← στ-1 (γ + 1)
             t_hat = c_t_minus_1 * (gamma + 1)
 
-            # Noise the coordinates with scaled Gaussian noise
+            # Algorithm 1 - line 6: Noise injection to diffused components
+            # ϵl ← λ√(σ̂² - σ²τ-1) · N(0, I3) · f^is_diffused
             epsilon_L = (
                 self.noise_scale
                 * torch.sqrt(torch.square(t_hat) - torch.square(c_t_minus_1))
@@ -219,9 +232,11 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
             epsilon_L[..., is_motif_atom_with_fixed_coord, :] = (
                 0  # No noise injection for fixed atoms
             )
+
+            # Algorithm 1 - line 7: x^noisy_l ← xl + ϵl
             X_noisy_L = X_L + epsilon_L
 
-            # Denoise the coordinates
+            # Algorithm 1 - line 8: {x̂0} ← DiffusionModule({x^noisy_l}, σ̂, {f*}, qinit_l, cl, plm, sinit_i, zinit_ij)
             # Handle chunked mode vs standard mode
             if "chunked_pairwise_embedder" in initializer_outputs:
                 # Chunked mode: explicitly provide P_LL=None
@@ -260,6 +275,8 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
             delta_L = (
                 X_noisy_L - X_denoised_L
             ) / t_hat  # gradient of x wrt. t at x_t_hat
+
+            # Algorithm 1 - line 9: dσ ← στ - σ̂
             d_t = c_t - t_hat
 
             if self.use_classifier_free_guidance and (
@@ -304,6 +321,7 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
                 )  # shape (D, L,)
                 sequence_entropy_traj.append(seq_entropy)
 
+            # Algorithm 1 - line 10: xl ← x^noisy_l + η · dσ · (xl - x̂0)/σ̂
             # Update the coordinates, scaled by the step size
             X_L = X_noisy_L + step_scale * d_t * delta_L
 
@@ -314,6 +332,8 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
             X_noisy_L_traj.append(X_noisy_L_scaled)
             X_denoised_L_traj.append(X_denoised_L)
             t_hats.append(t_hat)
+
+        # Algorithm 1 - line 11: end for
 
         if torch.any(is_motif_atom_with_fixed_coord) and self.allow_realignment:
             # Insert the gt motif at the end
@@ -331,6 +351,7 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
                 X_exists_L=is_motif_atom_with_fixed_coord,
             )
 
+        # Algorithm 1 - line 12: return {xl}
         return dict(
             X_L=X_L,  # (D, L, 3)
             X_noisy_L_traj=X_noisy_L_traj,  # list[Tensor[D, L, 3]]
@@ -344,8 +365,10 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
 
 class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
     """
+    Algorithm 2: Symmetric inference diffusion loop (./docs/rf3_si.pdf)
+
     This class is a wrapper around the SampleDiffusionWithMotif class.
-    It is used to sample diffusion with symmetry.
+    It is used to sample diffusion with symmetry for homo-oligomers.
     """
 
     def __init__(self, sym_step_frac: float = 0.9, **kwargs):
@@ -382,6 +405,12 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
         f_ref: dict[str, Any] | None,
         **_,
     ) -> dict[str, Any]:
+        """
+        Algorithm 2: Symmetric inference diffusion loop (./docs/rf3_si.pdf)
+
+        Symmetric variant of the inference loop for homo-oligomer design.
+        Applies symmetry operations to maintain symmetry throughout diffusion.
+        """
         # Motif setup to recenter the motif at every step
         is_motif_atom_with_fixed_coord = f["is_motif_atom_with_fixed_coord"]
         # Book-keeping
@@ -413,6 +442,8 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
 
         ranked_logger.info(f"gamma_min_sym: {gamma_min_sym}")
         ranked_logger.info(f"gamma_min: {self.gamma_min}")
+
+        # Algorithm 2 - line 3: for στ ∈ [σ1, ..., σT] do
         for step_num, (c_t_minus_1, c_t) in enumerate(
             zip(noise_schedule, noise_schedule[1:])
         ):
@@ -428,14 +459,16 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
                     is_motif_atom_with_fixed_coord,
                 )
 
-            # Update gamma & step scale
+            # Algorithm 2 - line 4: Modulation of ODE/SDE
+            # γ ← γ0 if στ > γmin else 0
             gamma = self.gamma_0 if c_t > self.gamma_min else 0
             step_scale = self.step_scale
 
-            # Compute the value of t_hat
+            # Algorithm 2 - line 5: σ̂ ← στ-1 (γ + 1)
             t_hat = c_t_minus_1 * (gamma + 1)
 
-            # Noise the coordinates with scaled Gaussian noise
+            # Algorithm 2 - line 6: Noise injection to diffused components
+            # ϵl ← λ√(σ̂² - σ²τ-1) · N(0, I3) · f^is_diffused
             epsilon_L = (
                 self.noise_scale
                 * torch.sqrt(torch.square(t_hat) - torch.square(c_t_minus_1))
@@ -445,9 +478,11 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
                 0  # No noise injection for fixed atoms
             )
 
+            # Algorithm 2 - line 7: x^noisy_l ← xl + ϵl
             # NOTE: no symmetry applied to the noisy structure
             X_noisy_L = X_L + epsilon_L
 
+            # Algorithm 2 - line 8: {x̂0} ← DiffusionModule({x^noisy_l}, σ̂, {f*}, qinit_l, cl, plm, sinit_i, zinit_ij)
             # Denoise the coordinates
             # Handle chunked mode vs standard mode (same as default sampler)
             if "chunked_pairwise_embedder" in initializer_outputs:
@@ -480,7 +515,9 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
                     f=f,
                     **initializer_outputs,
                 )
-            # apply symmetry to X_denoised_L
+
+            # Algorithm 2 - line 9: Apply symmetry operation (key difference from Algorithm 1)
+            # x̂0 ← ApplySymmetry(x̂0) for στ > σsym
             if "X_L" in outs and c_t > gamma_min_sym:
                 # outs["original_X_L"] = outs["X_L"].clone()
                 outs["X_L"] = self.apply_symmetry_to_X_L(outs["X_L"], f)
@@ -491,6 +528,8 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
             delta_L = (
                 X_noisy_L - X_denoised_L
             ) / t_hat  # gradient of x wrt. t at x_t_hat
+
+            # Algorithm 2 - line 10: dσ ← στ - σ̂
             d_t = c_t - t_hat
 
             # NOTE: no classifier-free guidance for symmetry
@@ -505,6 +544,7 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
                 )  # shape (D, L,)
                 sequence_entropy_traj.append(seq_entropy)
 
+            # Algorithm 2 - line 11: xl ← x^noisy_l + η · dσ · (xl - x̂0)/σ̂
             # Update the coordinates, scaled by the step size
             # delta_L should be symmetric
             X_L = X_noisy_L + step_scale * d_t * delta_L
@@ -516,6 +556,8 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
             X_noisy_L_traj.append(X_noisy_L_scaled)
             X_denoised_L_traj.append(X_denoised_L)
             t_hats.append(t_hat)
+
+        # Algorithm 2 - line 12: end for
 
         if torch.any(is_motif_atom_with_fixed_coord) and self.allow_realignment:
             # Insert the gt motif at the end
@@ -536,6 +578,7 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
                 X_exists_L=is_motif_atom_with_fixed_coord,
             )
 
+        # Algorithm 2 - line 13: return {xl}
         return dict(
             X_L=X_L,  # (D, L, 3)
             X_noisy_L_traj=X_noisy_L_traj,  # list[Tensor[D, L, 3]]
