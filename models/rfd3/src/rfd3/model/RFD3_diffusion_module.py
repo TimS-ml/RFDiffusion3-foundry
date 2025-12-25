@@ -297,7 +297,8 @@ class RFD3DiffusionModule(nn.Module):
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         """
-        扩散前向传播 (Algorithm 5: Diffusion forward pass with recycling)
+        Algorithm 5: Diffusion forward pass with recycling (./docs/rf3_si.pdf)
+        扩散前向传播
         Diffusion forward pass with recycling
 
         给定噪声坐标和编码特征,计算去噪后的位置。
@@ -317,6 +318,7 @@ class RFD3DiffusionModule(nn.Module):
         返回 / Returns:
             outputs: 包含去噪坐标和序列预测的字典 / Dictionary with denoised coordinates and sequence predictions
         """
+        # Algorithm 5 - line 1: Collect inputs and create attention indices
         # ===== 步骤1: 收集输入和创建注意力索引 / Step 1: Collect inputs and create attention indices =====
         tok_idx = f["atom_to_token_map"]  # [L] atom到token的映射 / Atom to token mapping
         L = len(tok_idx)  # 原子总数 / Total number of atoms
@@ -331,6 +333,7 @@ class RFD3DiffusionModule(nn.Module):
             n_attn_seq_neighbours=self.n_attn_seq_neighbours,  # 序列局部邻居 (默认32)
         )
 
+        # Algorithm 5 - line 2: Expand time tensors and mask fixed regions
         # ===== 步骤2-3: 扩展时间张量并屏蔽固定区域 / Step 2-3: Expand time tensors and mask fixed regions =====
         # t_L: [B, L] 每个atom的噪声水平,motif区域为0
         t_L = t.unsqueeze(-1).expand(-1, L) * (
@@ -341,22 +344,28 @@ class RFD3DiffusionModule(nn.Module):
             ~f["is_motif_token_with_fully_fixed_coord"]
         ).float().unsqueeze(0)
 
+        # Algorithm 5 - line 3: Scale positions (EDM preconditioning)
         # ===== 步骤4: 坐标缩放 (EDM预条件化) / Step 4: Scale positions (EDM preconditioning) =====
         R_L_uniform = self.scale_positions_in(X_noisy_L, t)  # [B, L, 3] 均匀缩放用于distogram
         R_noisy_L = self.scale_positions_in(X_noisy_L, t_L)  # [B, L, 3] 每atom缩放用于特征
 
+        # Algorithm 5 - line 4: Pool initial representation to token level (Downcast)
         # ===== 步骤5: 池化初始表示到token级 (Algorithm 9: Downcast) / Step 5: Pool initial representation to token level =====
         A_I = self.process_a(R_noisy_L, tok_idx=tok_idx)  # [B, I, c_token] 从坐标池化的token特征
         S_I = self.downcast_c(C_L, S_I, tok_idx=tok_idx)  # [I, c_s] 从atom特征池化的token特征
 
+        # Algorithm 5 - line 5: Add position and time embeddings
         # ===== 步骤6-7: 添加批次级特征 (时间条件化) / Step 6-7: Add batch-wise features (time conditioning) =====
         # Algorithm 5 步骤1: 坐标投影 + 初始化特征
         Q_L = Q_L_init.unsqueeze(0) + self.process_r(R_noisy_L)  # [B, L, c_atom]
+
+        # Algorithm 5 - line 6: Add time conditioning (Algorithm 17)
         # Algorithm 17: 添加时间条件化特征
         C_L = C_L.unsqueeze(0) + self.process_time_(t_L, i=0)  # [B, L, c_atom] atom级
         S_I = S_I.unsqueeze(0) + self.process_time_(t_I, i=1)  # [B, I, c_s] token级
         C_L = C_L + self.process_c(C_L)  # [B, L, c_atom] 额外的MLP处理
 
+        # Algorithm 5 - line 7: Local-atom self-attention encoder
         # ===== 步骤8: Local-Atom Self Attention (编码器) / Step 8: Local-Atom Self Attention (encoder) =====
         # Algorithm 5 步骤8: 局部atom transformer
         if chunked_pairwise_embedder is not None:
@@ -374,10 +383,12 @@ class RFD3DiffusionModule(nn.Module):
             # 标准模式:使用完整的P_LL / Standard mode: use full P_LL
             Q_L = self.encoder(Q_L, C_L, P_LL, indices=f["attn_indices"])
 
+        # Algorithm 5 - line 8: Pool atom features to token level (Downcast)
         # ===== 步骤9: 池化到token级准备transformer / Step 9: Pool to token level for transformer =====
         # Algorithm 9: Downcast - 将atom特征池化为token特征
         A_I = self.downcast_q(Q_L, A_I=A_I, S_I=S_I, tok_idx=tok_idx)  # [B, I, c_token]
 
+        # Algorithm 5 - line 9: for r ∈ [1, ..., n_recycle] do (Recycling loop)
         # ===== 步骤10-17: 循环处理 (Recycling Loop) / Step 10-17: Recycling loop =====
         # Algorithm 5 步骤10-17: 带distogram循环的迭代细化
         recycled_features = self.forward_with_recycle(
@@ -396,6 +407,8 @@ class RFD3DiffusionModule(nn.Module):
             initializer_outputs=initializer_outputs,
         )
 
+        # Algorithm 5 - line 17: end for
+        # Algorithm 5 - line 18: return x̂0
         # ===== 收集输出 / Collect outputs =====
         outputs = {
             "X_L": recycled_features["X_L"],  # [B, L, 3] 去噪后的坐标 / Denoised positions
@@ -496,6 +509,7 @@ class RFD3DiffusionModule(nn.Module):
         返回 / Returns:
             包含更新坐标、distogram和序列预测的字典 / Dictionary with updated coordinates, distogram, and sequence predictions
         """
+        # Algorithm 5 - line 10: DiffusionTokenEncoder (Algorithm 12)
         # ===== 步骤12: DiffusionTokenEncoder - 嵌入噪声尺度和循环distogram =====
         # Step 12: DiffusionTokenEncoder - Embed noise scale and recycled distogram
         # Algorithm 12: 将当前坐标的distogram和前一次循环的distogram嵌入到Z_II中
@@ -509,6 +523,7 @@ class RFD3DiffusionModule(nn.Module):
             P_LL=P_LL,  # [L, L, c_atompair] Atom配对特征
         )
 
+        # Algorithm 5 - line 11: DiffusionTransformer (Algorithm 6: LocalTokenTransformer)
         # ===== 步骤13: DiffusionTransformer - Token级稀疏注意力 =====
         # Step 13: DiffusionTransformer - Token-level sparse attention
         # Algorithm 6: LocalTokenTransformer with SL2 sparse attention
@@ -526,6 +541,7 @@ class RFD3DiffusionModule(nn.Module):
             full=not (os.environ.get("RFD3_LOW_MEMORY_MODE", None) == "1"),  # 低内存模式标志
         )
 
+        # Algorithm 5 - line 12: Decoder (CompactStreamingDecoder with Upcast)
         # ===== 步骤14: Decoder - 上投影并解码为结构 =====
         # Step 14: Decoder - Up-projection and decode to structure
         # CompactStreamingDecoder: Token -> Atom特征,包含Algorithm 10 (Upcast)
@@ -558,17 +574,23 @@ class RFD3DiffusionModule(nn.Module):
                 indices=f["attn_indices"],
             )
 
+        # Algorithm 5 - line 13: Project atom features to coordinate update
         # ===== 步骤15-16: 坐标更新和去预条件化 =====
         # Step 15-16: Coordinate update and de-preconditioning
         # Algorithm 5 步骤15: 投影atom特征到3D坐标更新
         R_update_L = self.to_r_update(Q_L)  # [B, L, 3] 预测的坐标更新
+
+        # Algorithm 5 - line 14: De-preconditioning (EDM scaling inverse)
         # 步骤16: EDM去预条件化,得到去噪后的坐标
         X_out_L = self.scale_positions_out(R_update_L, X_noisy_L, t_L)  # [B, L, 3]
 
+        # Algorithm 5 - line 15: Compute sequence logits and distogram for recycling
         # ===== 辅助输出:序列预测和distogram =====
         # Auxiliary outputs: sequence prediction and distogram
         # 序列预测头:从token特征预测残基类型
         sequence_logits_I, sequence_indices_I = self.sequence_head(A_I=A_I)
+
+        # Algorithm 5 - line 16: Bucketize distogram for next recycling iteration
         # 计算distogram用于下一次循环的self-conditioning
         # 使用detach()防止梯度回传到前一次循环
         D_II_self = self.bucketize_fn(X_out_L[..., f["is_ca"], :].detach())  # [B, I, I, n_bins]

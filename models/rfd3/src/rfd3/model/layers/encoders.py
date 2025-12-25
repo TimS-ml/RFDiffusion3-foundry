@@ -239,35 +239,47 @@ class TokenInitializer(nn.Module):
 
         def init_tokens():
             """
-            Algorithm 3: Token初始化器 / Token initializer
+            Algorithm 3: Token初始化器 / Token initializer (./docs/rf3_si.pdf)
             生成初始的token级单特征(S_I)和配对特征(Z_II)
+            Generate initial token-level single features (S_I) and pair features (Z_II)
             """
+            # Algorithm 3 - line 1: Embed token 1D features
             # ===== 步骤1-4: 嵌入1D特征 / Step 1-4: Embed 1D features =====
             # Algorithm 15: 嵌入token级1D特征(残基类型等)
             S_I = self.token_1d_embedder(f, I)  # [I, c_s]
+
+            # Algorithm 3 - line 2: Transition layer for feature mixing
             # 步骤5: Transition层混合特征
             S_I = S_I + self.transition_post_token(S_I)
 
+            # Algorithm 3 - line 3: Embed atom 1D features and downcast to token level
             # 嵌入atom级1D特征并下采样到token级
             # Algorithm 9: Downcast - 从atom池化到token
             S_I = self.downcast_atom(
                 Q_L=self.atom_1d_embedder_1(f, L), A_I=S_I, tok_idx=tok_idx
             )
+
+            # Algorithm 3 - line 4: Transition layer and normalization
             S_I = S_I + self.transition_post_atom(S_I)
             S_I = self.process_s_init(S_I)  # [I, c_s]
 
+            # Algorithm 3 - line 5: Initialize pair features Z_II with outer sum
             # ===== 步骤6-8: 初始化配对特征Z_II / Step 6-8: Initialize pair features Z_II =====
             # 步骤6-7: 从单特征生成配对特征 (outer sum: S_I_i + S_I_j)
             Z_init_II = self.to_z_init_i(S_I).unsqueeze(-3) + self.to_z_init_j(
                 S_I
             ).unsqueeze(-2)  # [I, I, c_z]
+
+            # Algorithm 3 - line 6: Add relative position encoding
             # 步骤8: 添加相对位置编码
             Z_init_II = Z_init_II + self.relative_position_encoding(f)
+            # Algorithm 3 - line 7: Add token bond information
             # 添加token间的化学键信息
             Z_init_II = Z_init_II + self.process_token_bonds(
                 f["token_bonds"].unsqueeze(-1).float()
             )
 
+            # Algorithm 3 - line 8: Embed reference coordinates
             # ===== 步骤9: 嵌入配体的参考坐标 / Step 9: Embed reference coordinates of ligands =====
             # Algorithm 14: PositionPairDistEmbedder
             token_id = f["ref_space_uid"][f["is_ca"]]  # C-alpha的token ID
@@ -279,11 +291,13 @@ class TokenInitializer(nn.Module):
                 f["ref_pos"][f["is_ca"]], valid_mask
             )
 
+            # Algorithm 3 - line 9: Pairformer transformer stack
             # ===== 步骤10-12: Pairformer transformer栈 / Step 10-12: Pairformer transformer stack =====
             # Algorithm 7: TransformerBlock - 使用全注意力处理配对特征
             for block in self.transformer_stack:
                 S_I, Z_init_II = block(S_I, Z_init_II)
 
+            # Algorithm 3 - line 10: Concatenate second relative position encoding and process
             # ===== 步骤13-19: 配对特征后处理 / Step 13-19: Post-process pair features =====
             # 拼接第二个相对位置编码并混合
             Z_init_II = torch.cat(
@@ -294,22 +308,28 @@ class TokenInitializer(nn.Module):
                 dim=-1,
             )  # [I, I, c_z * 2]
             Z_init_II = self.process_z_init(Z_init_II)  # [I, I, c_z]
+
+            # Algorithm 3 - line 11: Apply transition layers for final mixing
             # 两个Transition层进一步混合
             for b in range(2):
                 Z_init_II = Z_init_II + self.transition_1[b](Z_init_II)
 
+            # Algorithm 3 - line 12: return S_I, Z_II
             return {"S_init_I": S_I, "Z_init_II": Z_init_II}
 
         @activation_checkpointing
         def init_atoms(S_init_I, Z_init_II):
             """
-            Algorithm 4: Atom初始化器 / Atom initializer
+            Algorithm 4: Atom初始化器 / Atom initializer (./docs/rf3_si.pdf)
             生成atom级特征: Q_L_init, C_L, P_LL
+            Generate atom-level features: Q_L_init, C_L, P_LL
             """
+            # Algorithm 4 - line 1: Embed atom-level 1D features
             # ===== 步骤1: 嵌入atom级1D特征 / Step 1: Embed atom-level 1D features =====
             # Algorithm 15: OneDFeatureEmbedder for atom features
             Q_L_init = self.atom_1d_embedder_2(f, L)  # [L, c_atom]
 
+            # Algorithm 4 - line 2: Project from token features and add to atom features
             # ===== 步骤2: 从token特征投影 / Step 2: Project from token features =====
             C_L = Q_L_init + self.process_s_trunk(S_init_I)[..., tok_idx, :]  # [L, c_atom]
 
@@ -325,6 +345,7 @@ class TokenInitializer(nn.Module):
             else:
                 # ===== 标准模式:完整P_LL计算 / Standard mode: full P_LL computation =====
 
+                # Algorithm 4 - line 3: Embed motif coordinates
                 # ===== 步骤3: 嵌入Motif坐标 / Step 3: Embed motif coordinates =====
                 # Algorithm 13: SinusoidalDistEmbed - 正弦距离嵌入
                 # 仅对固定坐标的motif原子对计算距离
@@ -336,6 +357,7 @@ class TokenInitializer(nn.Module):
                     f["motif_pos"], valid_mask
                 )  # [L, L, c_atompair]
 
+                # Algorithm 4 - line 4: Embed reference positions
                 # ===== 步骤4: 嵌入参考位置 / Step 4: Embed reference positions =====
                 # Algorithm 14: PositionPairDistEmbedder
                 # 仅对同一token内的原子对计算距离
@@ -350,18 +372,23 @@ class TokenInitializer(nn.Module):
                 valid_mask = atoms_in_same_token & atoms_has_seq
                 P_LL = P_LL + self.ref_pos_embedder(f["ref_pos"], valid_mask)
 
+                # Algorithm 4 - line 5: Add outer sum of single atom features
                 # ===== 步骤5-7: Atom配对特征的MLP处理 / Step 5-7: MLP processing for atom pairwise features =====
                 # 步骤5: 添加单atom特征的外积 (outer sum: C_L_l + C_L_m)
                 P_LL = P_LL + (
                     self.process_single_l(C_L).unsqueeze(-2)
                     + self.process_single_m(C_L).unsqueeze(-3)
                 )
+
+                # Algorithm 4 - line 6: Add projected token pair features
                 # 步骤6: 添加从token配对特征投影的信息
                 # 将Z_II [I, I, c_z] 通过tok_idx索引到atom级 [L, L, c_z]
                 P_LL = (
                     P_LL
                     + self.process_z(Z_init_II)[..., tok_idx, :, :][..., tok_idx, :]
                 )
+
+                # Algorithm 4 - line 7: Deep MLP to mix all pairwise features
                 # 步骤7: 深度MLP混合所有配对特征
                 P_LL = P_LL + self.pair_mlp(P_LL)
                 P_LL = P_LL.contiguous()  # [L, L, c_atompair]
@@ -383,6 +410,7 @@ class TokenInitializer(nn.Module):
                         C_L.unsqueeze(0), None, P_LL, indices=None, f=f, X_L=None
                     ).squeeze(0)
 
+                # Algorithm 4 - line 8: return Q_L, C_L, P_LL, S_I, Z_II
                 return {
                     "Q_L_init": Q_L_init,  # [L, c_atom] 初始atom查询特征
                     "C_L": C_L,  # [L, c_atom] Atom条件特征
